@@ -22,6 +22,18 @@ import http.server
 import redis
 import ambient
 
+Debugging = False
+def DBG(*args):
+    if Debugging:
+        msg = " ".join([str(a) for a in args])
+        print(msg)
+
+Verbose = False
+def MSG(*args):
+    if Verbose:
+        msg = " ".join([str(a) for a in args])
+        print(msg)
+
 BTNAME='Complete Local Name'
 MAXDEVICES=16
 
@@ -48,7 +60,7 @@ class NotificationDelegate(bluepy.btle.DefaultDelegate):
     # ノーティフィケーションハンドラー  ボタンが押された時に呼ばれる
     def handleNotification(self, cHandle, data):
         button = struct.unpack("B", data)[0]
-        print('button %d on dev %s' % (button, self.sensortag.tag.addr))
+        MSG('button %d on dev %s' % (button, self.sensortag.tag.addr))
         if not self.button & self.POWER_BUTTON and button & self.POWER_BUTTON:
             if self.sensortag.r:
                 self.sensortag.r.hset(self.sensortag.tag.addr, 'button', 'on')
@@ -69,21 +81,18 @@ class _SensorTag():
         self.addrType = dev.addrType
         self.devicetype = "Sensortag CC2650"
     def unpair(self):
-        if args.d:
-            print('unpairing %s' % self)
+        MSG('unpairing %s' % self)
         self.running = False
         self.thread.join()
         pass
     def _sensorlookup(self, sensorname):
         if not hasattr(self.tag, sensorname):
-            if args.d:
-                print('not found %s' % sensorname)
+            MSG('not found %s' % sensorname)
             return None
         return getattr(self.tag,sensorname)
 
     def start(self, interval):
-        if args.d:
-            print('starting')
+        MSG('starting')
         self.r.hset(self.addr, 'rssi', self.rssi)
         self.am = None
         self.running = True
@@ -92,15 +101,14 @@ class _SensorTag():
         self.thread.start()
     def reconnect(self):
         try:
-            if args.d:
-                print('try to reconnect...')
+            MSG('try to reconnect...')
             self.tag.connect(self.addr)
-            if args.d:
-                print('reconnected.')
+            MSG('reconnected.')
             return True
-        except bluepy.btle.BTLEException:
-            if args.d:
-                print('reconnect failed.')
+        except bluepy.btle.BTLEException as e:
+            MSG('reconnect failed.')
+            MSG('type:' + str(type(e)))
+            MSG('args:' + str(e.args))
             return False
         return True
     def sendambient(self, sensorval):
@@ -119,13 +127,11 @@ class _SensorTag():
             if writekey == 'None': writekey = ''
             if ch != '' and writekey != '':
                 self.am = ambient.Ambient(ch, writekey)
-        if args.d:
-            print(dt.now().strftime("%Y/%m/%d %H:%M:%S"), end='')
-            print(data)
+        MSG(dt.now().strftime("%Y/%m/%d %H:%M:%S"))
+        MSG(data)
         if self.am:
             ret = self.am.send(data)
-            if args.d:
-                print('sent to Ambient (ret: %d)' % ret.status_code)
+            MSG('sent to Ambient (ret: %d)' % ret.status_code)
         sys.stdout.flush()
     def runread(self, sensors):
         sensorval = {}
@@ -141,16 +147,16 @@ class _SensorTag():
                     sensorval[sensor] = tagfn.read()
                     tagfn.disable()
         except bluepy.btle.BTLEException as e:
-            if args.d:
-                print('BTLE Exception while reading.')
+            MSG('BTLE Exception while reading.')
+            MSG('type:' + str(type(e)))
+            MSG('args:' + str(e.args))
             return False
         self.sendambient(sensorval)
         return True
     def runner(self, sensors, interval):
         while self.running:
-            if args.d:
-                print('thread running(%s)' % self.addr)
-                sys.stdout.flush()
+            MSG('thread running(%s)' % self.addr)
+            sys.stdout.flush()
             while True:
                 if self.runread(sensors): # センサーを読み、うまくいけばbreak
                     break
@@ -159,15 +165,18 @@ class _SensorTag():
                         self.tag.keypress.enable() # DISCONNECT例外が起きるとkeypressはdisableになるようなので、再度enabeにする
                         break;
             try:
+                MSG('wait for notification %d' % interval)
+                sys.stdout.flush()
                 self.tag.waitForNotifications(interval)
-            except bluepy.btle.BTLEException:
-                print('BTLE Exception while waitForNotifications')
+            except bluepy.btle.BTLEException as e:
+                MSG('BTLE Exception while waitForNotifications')
+                MSG('type:' + str(type(e)))
+                MSG('args:' + str(e.args))
                 while True: # うまくいくまで再接続を試みる
                     if self.reconnect():
                         self.tag.keypress.enable()
                         break;
-        if args.d:
-            print('Aborting')
+        MSG('Aborting')
 
 class ScanDelegate(bluepy.btle.DefaultDelegate):
     def __init__(self):
@@ -193,30 +202,25 @@ class ScanDelegate(bluepy.btle.DefaultDelegate):
                     # devaddrs[]にSensorTagのaddrを記録し、新しいデバイスが見つかったときだけ
                     # __SensorTagオブジェクトのインスタンスを作る
                     if dev.addr in self.devaddrs:
-                        if args.d:
-                            print('Known SensorTag %s' % dev.addr)
+                        MSG('Known SensorTag %s' % dev.addr)
                         return
-                    if args.d:
-                        print('New SensorTag %s' % dev.addr)
-                        sys.stdout.flush()
+                    MSG('New SensorTag %s' % dev.addr)
+                    sys.stdout.flush()
                     self.devaddrs.append(dev.addr)
                     thisdev = _SensorTag(dev, devdata)
                     self.activedevlist.append(thisdev)
                     thisdev.start(args.i)
             else:
-                if args.d:
-                    print('TOO MANY DEVICES - IGNORED %s' % dev.addr)
+                MSG('TOO MANY DEVICES - IGNORED %s' % dev.addr)
         elif isNewData:
             # if args.d:
             #     print('Received new data from %s' % dev.addr)
             pass
 
     def shutdown( self ):
-        if args.d:
-            print('My activedevlist= %s' % self.activedevlist)
+        MSG('My activedevlist= %s' % self.activedevlist)
         for dev in self.activedevlist:
-            if args.d:
-                print('dev= %s' % dev)
+            MSG('dev= %s' % dev)
             dev.unpair()
 
 def runscan():
@@ -228,8 +232,7 @@ def runscan():
             try:
                 devices = scanner.scan(timeout=30.0) # スキャンする。デバイスを見つけた後の処理はScanDelegateに任せる
             except bluepy.btle.BTLEException:
-                if args.d:
-                    print('BTLE Exception while scannning.')
+                MSG('BTLE Exception while scannning.')
     except KeyboardInterrupt:
         pass
 
@@ -239,9 +242,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-i',action='store',type=float, default=300.0, help='measurement interval in seconds')
     parser.add_argument('-d',action='store_true', help='debug msg on')
+    parser.add_argument('-v',action='store_true', help='verbose')
 
     global args
     args = parser.parse_args(sys.argv[1:])
+
+    global Verbose
+    Verbose = args.v
+
+    global Debugging
+    Debugging = args.d
+    bluepy.btle.Debugging = args.d
 
     scanthread = threading.Thread(target=runscan, args=())
     scanthread.daemon = True
