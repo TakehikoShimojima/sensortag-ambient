@@ -92,26 +92,27 @@ class _SensorTag():
         return getattr(self.tag,sensorname)
 
     def start(self, interval):
-        MSG('starting')
+        MSG('starting for ', self.addr)
         self.r.hset(self.addr, 'rssi', self.rssi)
         self.am = None
         self.running = True
         self.thread = threading.Thread(target=self.runner, args=(sensors, interval))
         self.thread.daemon = True
         self.thread.start()
-    def reconnect(self):
-        try:
-            MSG('try to reconnect...')
-            self.tag.connect(self.addr)
-            MSG('reconnected.')
-            return True
-        except bluepy.btle.BTLEException as e:
-            MSG('reconnect failed.')
-            MSG('type:' + str(type(e)))
-            MSG('args:' + str(e.args))
-            return False
-        return True
-    def sendambient(self, sensorval):
+    def _readsensors(self, sensors):
+        sensorval = {}
+        for sensor in sensors: # sensorsにあるセンサーをenableにする
+            tagfn = self._sensorlookup(sensor)
+            if tagfn:
+                tagfn.enable()
+        time.sleep( 1.0 )
+        for sensor in sensors: # sensorsにあるセンサーを読んで、disableにする
+            tagfn = self._sensorlookup(sensor)
+            if tagfn:
+                sensorval[sensor] = tagfn.read()
+                tagfn.disable()
+        return sensorval
+    def _sendambient(self, sensorval):
         data = {}
         data['d1'] = sensorval['IRtemperature'][0]
         data['d2'] = sensorval['humidity'][1]
@@ -127,56 +128,76 @@ class _SensorTag():
             if writekey == 'None': writekey = ''
             if ch != '' and writekey != '':
                 self.am = ambient.Ambient(ch, writekey)
-        MSG(dt.now().strftime("%Y/%m/%d %H:%M:%S"))
+        MSG('send to Ambient ', dt.now().strftime("%Y/%m/%d %H:%M:%S"), ' for ', self.addr)
         MSG(data)
         if self.am:
             ret = self.am.send(data)
-            MSG('sent to Ambient (ret: %d)' % ret.status_code)
+            MSG('sent to Ambient (ret: %d)' % ret.status_code, ' for ', self.addr)
         sys.stdout.flush()
-    def runread(self, sensors):
-        sensorval = {}
+    def _reconnect(self):
         try:
-            for sensor in sensors: # sensorsにあるセンサーをenableにする
-                tagfn = self._sensorlookup(sensor)
-                if tagfn:
-                    tagfn.enable()
-            time.sleep( 1.0 )
-            for sensor in sensors: # sensorsにあるセンサーを読んで、disableにする
-                tagfn = self._sensorlookup(sensor)
-                if tagfn:
-                    sensorval[sensor] = tagfn.read()
-                    tagfn.disable()
+            MSG('try to reconnect to ', self.addr)
+            self.tag.connect(self.addr)
+            self.tag.keypress.enable() # DISCONNECT例外が起きるとkeypressはdisableになるようなので、再度enabeにする
+            MSG('reconnected to ', self.addr)
+            return True
         except bluepy.btle.BTLEException as e:
-            MSG('BTLE Exception while reading.')
+            MSG('reconnect failed to ', self.addr)
+            MSG('BTLE Exception while reconnecting.')
             MSG('type:' + str(type(e)))
             MSG('args:' + str(e.args))
             return False
-        self.sendambient(sensorval)
         return True
-    def runner(self, sensors, interval):
+    def runner(self, sensors, interval): # スレッド処理本体
         while self.running:
+            sensorval = {}
             MSG('thread running(%s)' % self.addr)
             sys.stdout.flush()
             while True:
-                if self.runread(sensors): # センサーを読み、うまくいけばbreak
+                try:
+                    DBG('read sensors')
+                    sensorval = self._readsensors(sensors) # センサーを読み、うまくいけばループを抜ける
                     break
-                while True: # うまくいくまで再接続を試みる
-                    if self.reconnect():
-                        self.tag.keypress.enable() # DISCONNECT例外が起きるとkeypressはdisableになるようなので、再度enabeにする
-                        break;
-            try:
-                MSG('wait for notification %d' % interval)
+                except bluepy.btle.BTLEException as e:
+                    MSG('BTLE Exception while reading on ', self.addr)
+                    MSG('type:' + str(type(e)))
+                    MSG('args:' + str(e.args))
+                    while True: # うまくいくまで再接続を試みる
+                        if self._reconnect():
+                            break;
+            self._sendambient(sensorval)
+            start = time.time()
+            while True:
+                remain = start + interval - time.time()
+                if remain <= 0.0:
+                    break
+                try:
+                    MSG('wait for notification ', remain, ' for ', self.addr)
+                    sys.stdout.flush()
+                    ret = self.tag.waitForNotifications(remain)
+                    DBG('return from waitForNotification for ', self.addr, ', ret: ', ret)
+                    sys.stdout.flush()
+                except bluepy.btle.BTLEException as e:
+                    MSG('BTLE Exception while waitForNotifications for ', self.addr)
+                    MSG('type:' + str(type(e)))
+                    MSG('args:' + str(e.args))
+                    while True: # うまくいくまで再接続を試みる
+                        if self._reconnect():
+                            break;
+                else:
+                    if self.tag._helper != None:
+                        DBG('### helper alive for ', self.addr)
+                        sys.stdout.flush()
+                    else:
+                        DBG('### helper is dead for ', self.addr)
+                        sys.stdout.flush()
+                        while True: # うまくいくまで再接続を試みる
+                            if self._reconnect():
+                                break;
+                helperstat = 'alive' if (self.tag._helper != None) else 'dead'
+                DBG('end of try waitForNotifications for ', self.addr, ', helper: ', helperstat)
                 sys.stdout.flush()
-                self.tag.waitForNotifications(interval)
-            except bluepy.btle.BTLEException as e:
-                MSG('BTLE Exception while waitForNotifications')
-                MSG('type:' + str(type(e)))
-                MSG('args:' + str(e.args))
-                while True: # うまくいくまで再接続を試みる
-                    if self.reconnect():
-                        self.tag.keypress.enable()
-                        break;
-        MSG('Aborting')
+        MSG('Thread exiting ', self.addr)
 
 class ScanDelegate(bluepy.btle.DefaultDelegate):
     def __init__(self):
